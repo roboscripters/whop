@@ -139,12 +139,18 @@ def find_best_segment(combined_score, window_sec, clip_len_sec, hook_boost_sec=2
 
 
 def cut_clip(video_path, start_time, end_time, output_path):
-    """Cut using ffmpeg with re-encode for frame-accurate trimming."""
+    """Cut using ffmpeg with re-encode for frame-accurate trimming.
+
+    -movflags +faststart moves the mp4 index (moov atom) to the front of
+    the file. Without this, browsers can't stream/seek the video until
+    the whole file downloads — causing the "only plays a few seconds,
+    then dumps the whole download at once" symptom.
+    """
     duration = end_time - start_time
     subprocess.run(
         ["ffmpeg", "-y", "-ss", str(start_time), "-i", video_path,
          "-t", str(duration), "-c:v", "libx264", "-c:a", "aac",
-         "-preset", "fast", output_path],
+         "-preset", "fast", "-movflags", "+faststart", output_path],
         check=True, capture_output=True
     )
 
