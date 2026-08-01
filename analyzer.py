@@ -1,10 +1,11 @@
 """
 analyzer.py
-Core logic for finding the "best hook" segment in a video using
-audio energy + motion energy, then cutting it with ffmpeg.
+Core logic for finding the "best hook" segment(s) in a video using
+audio energy + motion energy, then cutting them with ffmpeg.
 
-No AI/ML models required — pure signal analysis, so it's fast and cheap
-to run on a small VPS.
+Supports two modes:
+- Single clip (short trailers): one best segment
+- Multi-clip (long podcasts): N best non-overlapping segments
 """
 
 import subprocess
@@ -13,8 +14,13 @@ import librosa
 import cv2
 import os
 import json
+import random
 
 WINDOW_SEC = 0.5  # resolution of the excitement timeline
+
+# Videos longer than this get sparser frame sampling for motion analysis,
+# so a 2-hour podcast doesn't take forever to process even on strong hardware.
+LONG_VIDEO_THRESHOLD_SEC = 20 * 60
 
 
 def get_video_duration(video_path):
@@ -55,10 +61,20 @@ def motion_energy_timeline(video_path, duration, window_sec=WINDOW_SEC):
     """
     Sample frames at a fixed rate, compute frame-to-frame pixel diff
     (downscaled + grayscale for speed) as a proxy for visual 'busyness'.
+
+    For long videos (podcasts), sample less densely — we don't need 5
+    frames/sec of motion data for a 2-hour recording, and it keeps
+    processing time reasonable even with plenty of CPU available.
     """
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    sample_every_n_frames = max(1, int(fps * 0.2))  # sample ~5 frames/sec
+
+    if duration > LONG_VIDEO_THRESHOLD_SEC:
+        samples_per_sec = 1  # 1 frame/sec is plenty for a talking-head podcast
+    else:
+        samples_per_sec = 5
+
+    sample_every_n_frames = max(1, int(fps / samples_per_sec))
 
     n_windows = int(np.ceil(duration / window_sec))
     window_scores = [[] for _ in range(n_windows)]
@@ -96,46 +112,62 @@ def normalize(arr):
     return (arr - arr.min()) / (arr.max() - arr.min())
 
 
-def find_best_segment(combined_score, window_sec, clip_len_sec, hook_boost_sec=2.0):
+def find_top_segments(combined_score, window_sec, clip_len_sec, n_clips=1,
+                       hook_boost_sec=2.0, min_gap_sec=None):
     """
-    Slide a window of clip_len_sec across the combined excitement score
-    to find the highest-total-score contiguous segment.
+    Find the top N highest-scoring non-overlapping segments.
 
-    Then nudge the start point to a local rising edge within the first
-    couple seconds so the clip doesn't start mid-lull.
+    min_gap_sec: minimum spacing enforced between clip starts, so clips
+    from a long podcast don't cluster all in the same few minutes.
+    Defaults to clip_len_sec (i.e. clips can't overlap at all).
     """
+    if min_gap_sec is None:
+        min_gap_sec = clip_len_sec
+
     n_windows = len(combined_score)
     clip_windows = max(1, int(round(clip_len_sec / window_sec)))
+    gap_windows = max(1, int(round(min_gap_sec / window_sec)))
 
     if clip_windows >= n_windows:
-        return 0.0, n_windows * window_sec
+        return [(0.0, n_windows * window_sec)]
 
-    # cumulative sum for fast window-sum lookups
     cumsum = np.cumsum(np.insert(combined_score, 0, 0))
-    best_start_idx = 0
-    best_sum = -1
+    window_sums = [
+        (cumsum[start + clip_windows] - cumsum[start], start)
+        for start in range(0, n_windows - clip_windows + 1)
+    ]
+    window_sums.sort(key=lambda x: -x[0])
 
-    for start in range(0, n_windows - clip_windows + 1):
-        window_sum = cumsum[start + clip_windows] - cumsum[start]
-        if window_sum > best_sum:
-            best_sum = window_sum
-            best_start_idx = start
+    chosen_starts = []
+    for score, start in window_sums:
+        if len(chosen_starts) >= n_clips:
+            break
+        # Reject if too close to an already-chosen clip
+        if any(abs(start - c) < gap_windows for c in chosen_starts):
+            continue
+        chosen_starts.append(start)
 
-    # Snap start to the strongest rising edge within hook_boost_sec of the window start
-    boost_windows = int(hook_boost_sec / window_sec)
-    search_end = min(best_start_idx + boost_windows, n_windows - 1)
-    best_rise_idx = best_start_idx
-    best_rise_val = -1
-    for i in range(best_start_idx, search_end):
-        if i + 1 < n_windows:
-            rise = combined_score[i + 1] - combined_score[i]
-            if rise > best_rise_val:
-                best_rise_val = rise
-                best_rise_idx = i
+    # If we couldn't find enough non-overlapping segments (short source video),
+    # just return what we found
+    segments = []
+    for start_idx in sorted(chosen_starts):
+        # Snap to strongest rising edge nearby, like the single-clip version
+        boost_windows = int(hook_boost_sec / window_sec)
+        search_end = min(start_idx + boost_windows, n_windows - 1)
+        best_rise_idx = start_idx
+        best_rise_val = -1
+        for i in range(start_idx, search_end):
+            if i + 1 < n_windows:
+                rise = combined_score[i + 1] - combined_score[i]
+                if rise > best_rise_val:
+                    best_rise_val = rise
+                    best_rise_idx = i
 
-    start_time = best_rise_idx * window_sec
-    end_time = start_time + clip_len_sec
-    return start_time, end_time
+        start_time = best_rise_idx * window_sec
+        end_time = start_time + clip_len_sec
+        segments.append((start_time, end_time))
+
+    return segments
 
 
 def cut_clip(video_path, start_time, end_time, output_path):
@@ -143,7 +175,7 @@ def cut_clip(video_path, start_time, end_time, output_path):
 
     -movflags +faststart moves the mp4 index (moov atom) to the front of
     the file. Without this, browsers can't stream/seek the video until
-    the whole file downloads — causing the "only plays a few seconds,
+    the whole file downloads — causing a "only plays a few seconds,
     then dumps the whole download at once" symptom.
     """
     duration = end_time - start_time
@@ -153,9 +185,6 @@ def cut_clip(video_path, start_time, end_time, output_path):
          "-preset", "fast", "-movflags", "+faststart", output_path],
         check=True, capture_output=True
     )
-
-
-import random
 
 
 HOOK_POOLS = {
@@ -235,13 +264,19 @@ def generate_hook(audio_scores, motion_scores, start_time, end_time, window_sec=
     return hook, vibe
 
 
-def analyze_and_clip(video_path, output_path, clip_len_sec=30,
-                      audio_weight=0.5, motion_weight=0.5, progress_callback=None):
+def analyze_and_clip(video_path, output_dir, job_id, clip_len_sec=30,
+                      audio_weight=0.5, motion_weight=0.5, n_clips=1,
+                      progress_callback=None):
     """
-    Main entry point. Returns dict with timing info + output path.
+    Main entry point. Returns a dict with a 'clips' list (each with its own
+    timing, hook, vibe, output path) plus overall video_duration.
 
-    progress_callback(stage: str, pct: int) is called at each step, if provided,
-    so a caller (e.g. a Flask job-status endpoint) can report live progress.
+    n_clips: how many top non-overlapping clips to extract. Use 1 for
+    short trailers, 3-5+ for long podcasts/streams.
+
+    progress_callback(stage: str, pct: int) is called at each step, if
+    provided, so a caller (e.g. a Flask job-status endpoint) can report
+    live progress.
     """
     def report(stage, pct):
         if progress_callback:
@@ -262,26 +297,36 @@ def analyze_and_clip(video_path, output_path, clip_len_sec=30,
     report("Analyzing motion energy", 65)
     motion_scores = motion_energy_timeline(video_path, duration)
 
-    report("Scoring best segment", 85)
-    # align lengths (audio/motion window counts should match, but just in case)
+    report("Scoring best segments", 80)
     n = min(len(audio_scores), len(motion_scores))
     audio_scores, motion_scores = audio_scores[:n], motion_scores[:n]
 
     combined = audio_weight * audio_scores + motion_weight * motion_scores
-    start_time, end_time = find_best_segment(combined, WINDOW_SEC, clip_len_sec)
+    segments = find_top_segments(combined, WINDOW_SEC, clip_len_sec, n_clips=n_clips)
 
-    report("Cutting clip", 95)
-    cut_clip(video_path, start_time, end_time, output_path)
+    clips = []
+    total_segments = len(segments)
+    for i, (start_time, end_time) in enumerate(segments):
+        pct = 85 + int(10 * (i + 1) / max(1, total_segments))
+        report(f"Cutting clip {i + 1}/{total_segments}", pct)
 
-    hook_text, vibe = generate_hook(audio_scores, motion_scores, start_time, end_time)
+        output_path = os.path.join(output_dir, f"{job_id}_clip{i + 1}.mp4")
+        cut_clip(video_path, start_time, end_time, output_path)
+
+        hook_text, vibe = generate_hook(audio_scores, motion_scores, start_time, end_time)
+
+        clips.append({
+            "start_time": round(start_time, 2),
+            "end_time": round(end_time, 2),
+            "duration": round(end_time - start_time, 2),
+            "output_path": output_path,
+            "filename": os.path.basename(output_path),
+            "hook": hook_text,
+            "vibe": vibe,
+        })
 
     report("Done", 100)
     return {
-        "start_time": round(start_time, 2),
-        "end_time": round(end_time, 2),
-        "duration": round(end_time - start_time, 2),
         "video_duration": round(duration, 2),
-        "output_path": output_path,
-        "hook": hook_text,
-        "vibe": vibe,
+        "clips": clips,
     }
