@@ -149,6 +149,86 @@ def cut_clip(video_path, start_time, end_time, output_path):
     )
 
 
+import random
+
+
+HOOK_POOLS = {
+    "action": [
+        "Wait for it...",
+        "This is why you don't blink",
+        "The moment everything goes wrong",
+        "Nobody was ready for this",
+        "This escalated fast",
+        "The chaos speaks for itself",
+        "This is what panic looks like",
+    ],
+    "dialogue": [
+        "This line hits different",
+        "The way she said it though...",
+        "Nobody expected this response",
+        "This confession came out of nowhere",
+        "The silence after this line says it all",
+        "This is the moment everything changed",
+        "Read between the lines on this one",
+    ],
+    "relatable": [
+        "POV: this is literally you",
+        "This is way too accurate",
+        "Tell me you've felt this without telling me",
+        "The way this hit too close to home",
+        "This is everyone's villain era starting",
+        "Why is this so real though",
+        "POV: the moment you realize the truth",
+    ],
+    "dramatic": [
+        "This scene will wreck you",
+        "The tension in this moment is unmatched",
+        "This is the turning point",
+        "Everything builds to this",
+        "This is the scene nobody talks about enough",
+        "The shift in energy here is insane",
+        "This is where it all falls apart",
+    ],
+}
+
+
+def classify_vibe(audio_seg, motion_seg):
+    """
+    Classify a clip segment's 'vibe' from its audio/motion energy signature,
+    so we can pick a hook pool that actually fits the footage's energy.
+    """
+    avg_audio = float(np.mean(audio_seg)) if len(audio_seg) else 0.0
+    avg_motion = float(np.mean(motion_seg)) if len(motion_seg) else 0.0
+    volatility = float(np.std(audio_seg) + np.std(motion_seg)) if len(audio_seg) else 0.0
+
+    high_audio = avg_audio > 0.5
+    high_motion = avg_motion > 0.5
+    high_volatility = volatility > 0.35
+
+    if high_volatility:
+        return "dramatic"
+    if high_audio and high_motion:
+        return "action"
+    if high_audio and not high_motion:
+        return "dialogue"
+    return "relatable"
+
+
+def generate_hook(audio_scores, motion_scores, start_time, end_time, window_sec=WINDOW_SEC):
+    """
+    Pick a fully-written hook line whose vibe matches the selected clip segment.
+    Returns (hook_text, vibe_label).
+    """
+    start_idx = int(start_time / window_sec)
+    end_idx = int(end_time / window_sec)
+    audio_seg = audio_scores[start_idx:end_idx]
+    motion_seg = motion_scores[start_idx:end_idx]
+
+    vibe = classify_vibe(audio_seg, motion_seg)
+    hook = random.choice(HOOK_POOLS[vibe])
+    return hook, vibe
+
+
 def analyze_and_clip(video_path, output_path, clip_len_sec=30,
                       audio_weight=0.5, motion_weight=0.5, progress_callback=None):
     """
@@ -187,6 +267,8 @@ def analyze_and_clip(video_path, output_path, clip_len_sec=30,
     report("Cutting clip", 95)
     cut_clip(video_path, start_time, end_time, output_path)
 
+    hook_text, vibe = generate_hook(audio_scores, motion_scores, start_time, end_time)
+
     report("Done", 100)
     return {
         "start_time": round(start_time, 2),
@@ -194,4 +276,6 @@ def analyze_and_clip(video_path, output_path, clip_len_sec=30,
         "duration": round(end_time - start_time, 2),
         "video_duration": round(duration, 2),
         "output_path": output_path,
+        "hook": hook_text,
+        "vibe": vibe,
     }
