@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Whop Clipper — Auto Hook Finder</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, system-ui, sans-serif;
+    background: #0f0f14;
+    color: #f0f0f5;
+    padding: 20px;
+  }
+  .container { max-width: 480px; margin: 0 auto; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  p.sub { color: #9a9aa5; font-size: 14px; margin-top: 0; margin-bottom: 24px; }
+  .card {
+    background: #1a1a22;
+    border-radius: 16px;
+    padding: 20px;
+    margin-bottom: 16px;
+    border: 1px solid #2a2a35;
+  }
+  label { display: block; font-size: 14px; margin-bottom: 8px; color: #c5c5d0; }
+  input[type="file"] {
+    width: 100%;
+    padding: 12px;
+    background: #24242e;
+    border: 1px dashed #3a3a48;
+    border-radius: 10px;
+    color: #f0f0f5;
+    margin-bottom: 16px;
+  }
+  input[type="range"] { width: 100%; }
+  .range-val { text-align: center; font-size: 18px; font-weight: 600; margin: 8px 0 16px; color: #7c9fff; }
+  button {
+    width: 100%;
+    padding: 14px;
+    background: #5b6cff;
+    border: none;
+    border-radius: 10px;
+    color: white;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { background: #3a3a48; }
+  #status { margin-top: 16px; font-size: 14px; color: #9a9aa5; text-align: center; min-height: 20px; }
+  #result { display: none; margin-top: 16px; }
+  #result video { width: 100%; border-radius: 12px; }
+  .meta { font-size: 13px; color: #9a9aa5; margin-top: 10px; line-height: 1.6; }
+  a.download-btn {
+    display: block;
+    text-align: center;
+    margin-top: 12px;
+    padding: 12px;
+    background: #24242e;
+    border-radius: 10px;
+    color: #7c9fff;
+    text-decoration: none;
+    font-weight: 600;
+  }
+  .spinner {
+    border: 3px solid #2a2a35;
+    border-top: 3px solid #7c9fff;
+    border-radius: 50%;
+    width: 24px;
+    height: 24px;
+    animation: spin 0.8s linear infinite;
+    margin: 0 auto 10px;
+    display: none;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🎬 Whop Clipper</h1>
+  <p class="sub">Upload a trailer — get back the best hook, auto-cut.</p>
+
+  <div class="card">
+    <label for="video">Video file (trailer, up to ~500MB)</label>
+    <input type="file" id="video" accept="video/*">
+
+    <label for="cliplen">Clip length: <span class="range-val" id="cliplenVal">30s</span></label>
+    <input type="range" id="cliplen" min="15" max="60" value="30" step="5">
+
+    <button id="processBtn">Find Best Clip</button>
+  </div>
+
+  <div class="spinner" id="spinner"></div>
+  <div id="status"></div>
+
+  <div id="result" class="card">
+    <video id="resultVideo" controls></video>
+    <div class="meta" id="resultMeta"></div>
+    <a id="downloadLink" class="download-btn" href="#" download>⬇ Download Clip</a>
+  </div>
+</div>
+
+<script>
+const cliplenInput = document.getElementById('cliplen');
+const cliplenVal = document.getElementById('cliplenVal');
+cliplenInput.addEventListener('input', () => {
+  cliplenVal.textContent = cliplenInput.value + 's';
+});
+
+document.getElementById('processBtn').addEventListener('click', async () => {
+  const fileInput = document.getElementById('video');
+  const status = document.getElementById('status');
+  const spinner = document.getElementById('spinner');
+  const btn = document.getElementById('processBtn');
+  const result = document.getElementById('result');
+
+  if (!fileInput.files.length) {
+    status.textContent = 'Pick a video first.';
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append('video', fileInput.files[0]);
+  formData.append('clip_len', cliplenInput.value);
+
+  btn.disabled = true;
+  spinner.style.display = 'block';
+  status.textContent = 'Analyzing audio + motion energy... this can take a minute.';
+  result.style.display = 'none';
+
+  try {
+    const res = await fetch('/process', { method: 'POST', body: formData });
+    const data = await res.json();
+
+    if (data.error) {
+      status.textContent = 'Error: ' + data.error;
+    } else {
+      status.textContent = 'Done!';
+      document.getElementById('resultVideo').src = data.download_url;
+      document.getElementById('downloadLink').href = data.download_url;
+      document.getElementById('resultMeta').textContent =
+        `Clip taken from ${data.start_time}s–${data.end_time}s of a ${data.source_duration}s source (${data.clip_duration}s clip).`;
+      result.style.display = 'block';
+    }
+  } catch (err) {
+    status.textContent = 'Upload failed: ' + err.message;
+  } finally {
+    btn.disabled = false;
+    spinner.style.display = 'none';
+  }
+});
+</script>
+</body>
+</html>
