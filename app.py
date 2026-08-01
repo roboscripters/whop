@@ -47,6 +47,8 @@ def run_job(job_id, input_path, output_path, clip_len):
             end_time=result["end_time"],
             clip_duration=result["duration"],
             source_duration=result["video_duration"],
+            hook=result["hook"],
+            vibe=result["vibe"],
         )
     except Exception as e:
         set_job(job_id, status="error", error=str(e))
