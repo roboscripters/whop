@@ -48,7 +48,6 @@
   }
   button:disabled { background: #3a3a48; }
 
-  /* Progress card */
   #progressCard { display: none; }
   .stage-label {
     font-size: 15px;
@@ -107,12 +106,55 @@
     text-decoration: none;
     font-weight: 600;
   }
+
+  /* Generated hook */
+  .hook-box {
+    margin-top: 16px;
+    background: #1e2440;
+    border: 1px solid #3a4a8a;
+    border-radius: 12px;
+    padding: 14px;
+  }
+  .hook-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #7c9fff;
+    margin-bottom: 6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .hook-vibe-tag {
+    background: #2a2a45;
+    color: #9db3ff;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 10px;
+    text-transform: capitalize;
+  }
+  .hook-text {
+    font-size: 17px;
+    font-weight: 700;
+    color: #f0f0f5;
+    margin-bottom: 12px;
+    line-height: 1.4;
+  }
+  button.copy-hook-btn {
+    background: #5b6cff;
+    padding: 10px;
+    font-size: 13px;
+  }
+  button.copy-hook-btn.copied {
+    background: #2d5a3d;
+    color: #4ade80;
+  }
 </style>
 </head>
 <body>
 <div class="container">
   <h1>🎬 Whop Clipper</h1>
-  <p class="sub">Upload a trailer — get back the best hook, auto-cut.</p>
+  <p class="sub">Upload a trailer — get back the best hook, auto-cut, with a matching text hook.</p>
 
   <div class="card" id="uploadCard">
     <label for="video">Video file (trailer, up to ~500MB)</label>
@@ -142,6 +184,16 @@
   <div id="result" class="card">
     <video id="resultVideo" controls></video>
     <div class="meta" id="resultMeta"></div>
+
+    <div class="hook-box">
+      <div class="hook-label">
+        <span>Suggested Hook</span>
+        <span class="hook-vibe-tag" id="hookVibeTag"></span>
+      </div>
+      <div class="hook-text" id="hookText"></div>
+      <button class="copy-hook-btn" id="copyHookBtn">Copy Hook</button>
+    </div>
+
     <a id="downloadLink" class="download-btn" href="#" download>⬇ Download Clip</a>
   </div>
 </div>
@@ -153,7 +205,6 @@ cliplenInput.addEventListener('input', () => {
   cliplenVal.textContent = cliplenInput.value + 's';
 });
 
-const uploadCard = document.getElementById('uploadCard');
 const progressCard = document.getElementById('progressCard');
 const stageLabel = document.getElementById('stageLabel');
 const progressFill = document.getElementById('progressFill');
@@ -161,7 +212,6 @@ const progressPct = document.getElementById('progressPct');
 const errorBox = document.getElementById('errorBox');
 const result = document.getElementById('result');
 
-// Map backend stage text -> step key, for the little step tracker
 function stageKey(stage) {
   const s = stage.toLowerCase();
   if (s.includes('audio')) return 'audio';
@@ -209,6 +259,10 @@ async function pollStatus(jobId) {
       document.getElementById('downloadLink').href = data.download_url;
       document.getElementById('resultMeta').textContent =
         `Clip taken from ${data.start_time}s–${data.end_time}s of a ${data.source_duration}s source (${data.clip_duration}s clip).`;
+
+      document.getElementById('hookText').textContent = data.hook || '';
+      document.getElementById('hookVibeTag').textContent = data.vibe || '';
+
       result.style.display = 'block';
     } else if (data.status === 'error') {
       clearInterval(pollTimer);
@@ -224,6 +278,19 @@ function showError(msg) {
   errorBox.textContent = '⚠ ' + msg;
   document.getElementById('processBtn').disabled = false;
 }
+
+document.getElementById('copyHookBtn').addEventListener('click', () => {
+  const btn = document.getElementById('copyHookBtn');
+  const text = document.getElementById('hookText').textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied ✓';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = 'Copy Hook';
+      btn.classList.remove('copied');
+    }, 1500);
+  });
+});
 
 document.getElementById('processBtn').addEventListener('click', async () => {
   const fileInput = document.getElementById('video');
