@@ -48,6 +48,15 @@
   }
   button:disabled { background: #3a3a48; }
 
+  .mode-toggle { display: flex; gap: 8px; margin-bottom: 16px; }
+  .mode-toggle button {
+    flex: 1;
+    background: #24242e;
+    color: #9a9aa5;
+    font-size: 13px;
+  }
+  .mode-toggle button.active { background: #5b6cff; color: white; }
+
   #progressCard { display: none; }
   .stage-label {
     font-size: 15px;
@@ -92,8 +101,20 @@
     margin-top: 16px;
   }
 
-  #result { display: none; margin-top: 16px; }
-  #result video { width: 100%; border-radius: 12px; }
+  #resultsHeader {
+    display: none;
+    font-size: 14px;
+    color: #9a9aa5;
+    margin: 20px 0 10px;
+  }
+  .clip-card { display: none; }
+  .clip-card video { width: 100%; border-radius: 12px; }
+  .clip-number {
+    font-size: 12px;
+    color: #7c9fff;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
   .meta { font-size: 13px; color: #9a9aa5; margin-top: 10px; line-height: 1.6; }
   a.download-btn {
     display: block;
@@ -107,7 +128,6 @@
     font-weight: 600;
   }
 
-  /* Generated hook */
   .hook-box {
     margin-top: 16px;
     background: #1e2440;
@@ -154,16 +174,26 @@
 <body>
 <div class="container">
   <h1>🎬 Whop Clipper</h1>
-  <p class="sub">Upload a trailer — get back the best hook, auto-cut, with a matching text hook.</p>
+  <p class="sub">Upload a trailer or podcast — get back the best clip(s), auto-cut, with matching hooks.</p>
 
   <div class="card" id="uploadCard">
-    <label for="video">Video file (trailer, up to ~500MB)</label>
+    <div class="mode-toggle">
+      <button id="modeTrailerBtn" class="active">Trailer (1 clip)</button>
+      <button id="modePodcastBtn">Podcast (multi-clip)</button>
+    </div>
+
+    <label for="video">Video file (up to ~2GB)</label>
     <input type="file" id="video" accept="video/*">
 
     <label for="cliplen">Clip length: <span class="range-val" id="cliplenVal">30s</span></label>
     <input type="range" id="cliplen" min="15" max="60" value="30" step="5">
 
-    <button id="processBtn">Find Best Clip</button>
+    <div id="clipCountRow" style="display:none;">
+      <label for="clipcount">Number of clips: <span class="range-val" id="clipcountVal">3</span></label>
+      <input type="range" id="clipcount" min="3" max="5" value="3" step="1">
+    </div>
+
+    <button id="processBtn">Find Best Clip(s)</button>
   </div>
 
   <div class="card" id="progressCard">
@@ -181,21 +211,8 @@
     <div id="errorBox"></div>
   </div>
 
-  <div id="result" class="card">
-    <video id="resultVideo" controls></video>
-    <div class="meta" id="resultMeta"></div>
-
-    <div class="hook-box">
-      <div class="hook-label">
-        <span>Suggested Hook</span>
-        <span class="hook-vibe-tag" id="hookVibeTag"></span>
-      </div>
-      <div class="hook-text" id="hookText"></div>
-      <button class="copy-hook-btn" id="copyHookBtn">Copy Hook</button>
-    </div>
-
-    <a id="downloadLink" class="download-btn" href="#" download>⬇ Download Clip</a>
-  </div>
+  <div id="resultsHeader"></div>
+  <div id="resultsContainer"></div>
 </div>
 
 <script>
@@ -205,12 +222,38 @@ cliplenInput.addEventListener('input', () => {
   cliplenVal.textContent = cliplenInput.value + 's';
 });
 
+const clipcountInput = document.getElementById('clipcount');
+const clipcountVal = document.getElementById('clipcountVal');
+clipcountInput.addEventListener('input', () => {
+  clipcountVal.textContent = clipcountInput.value;
+});
+
+// ---- Mode toggle (trailer = 1 clip, podcast = multi-clip) ----
+const modeTrailerBtn = document.getElementById('modeTrailerBtn');
+const modePodcastBtn = document.getElementById('modePodcastBtn');
+const clipCountRow = document.getElementById('clipCountRow');
+let currentMode = 'trailer';
+
+modeTrailerBtn.addEventListener('click', () => {
+  currentMode = 'trailer';
+  modeTrailerBtn.classList.add('active');
+  modePodcastBtn.classList.remove('active');
+  clipCountRow.style.display = 'none';
+});
+modePodcastBtn.addEventListener('click', () => {
+  currentMode = 'podcast';
+  modePodcastBtn.classList.add('active');
+  modeTrailerBtn.classList.remove('active');
+  clipCountRow.style.display = 'block';
+});
+
 const progressCard = document.getElementById('progressCard');
 const stageLabel = document.getElementById('stageLabel');
 const progressFill = document.getElementById('progressFill');
 const progressPct = document.getElementById('progressPct');
 const errorBox = document.getElementById('errorBox');
-const result = document.getElementById('result');
+const resultsHeader = document.getElementById('resultsHeader');
+const resultsContainer = document.getElementById('resultsContainer');
 
 function stageKey(stage) {
   const s = stage.toLowerCase();
@@ -231,6 +274,65 @@ function updateSteps(currentKey) {
     if (currentIdx === -1) return;
     if (idx < currentIdx) el.classList.add('complete');
     else if (idx === currentIdx) el.classList.add('active');
+  });
+}
+
+function renderClips(clips, sourceDuration) {
+  resultsContainer.innerHTML = '';
+  resultsHeader.style.display = 'block';
+  resultsHeader.textContent = `${clips.length} clip${clips.length > 1 ? 's' : ''} found from a ${sourceDuration}s source`;
+
+  clips.forEach((clip, idx) => {
+    const card = document.createElement('div');
+    card.className = 'card clip-card';
+    card.style.display = 'block';
+
+    const number = document.createElement('div');
+    number.className = 'clip-number';
+    number.textContent = `CLIP ${idx + 1} OF ${clips.length}`;
+    card.appendChild(number);
+
+    const video = document.createElement('video');
+    video.controls = true;
+    video.src = clip.download_url;
+    card.appendChild(video);
+
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = `Taken from ${clip.start_time}s–${clip.end_time}s (${clip.duration}s clip).`;
+    card.appendChild(meta);
+
+    const hookBox = document.createElement('div');
+    hookBox.className = 'hook-box';
+    hookBox.innerHTML = `
+      <div class="hook-label">
+        <span>Suggested Hook</span>
+        <span class="hook-vibe-tag">${clip.vibe}</span>
+      </div>
+      <div class="hook-text">${clip.hook}</div>
+      <button class="copy-hook-btn">Copy Hook</button>
+    `;
+    const copyBtn = hookBox.querySelector('.copy-hook-btn');
+    copyBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(clip.hook).then(() => {
+        copyBtn.textContent = 'Copied ✓';
+        copyBtn.classList.add('copied');
+        setTimeout(() => {
+          copyBtn.textContent = 'Copy Hook';
+          copyBtn.classList.remove('copied');
+        }, 1500);
+      });
+    });
+    card.appendChild(hookBox);
+
+    const downloadLink = document.createElement('a');
+    downloadLink.className = 'download-btn';
+    downloadLink.href = clip.download_url;
+    downloadLink.download = '';
+    downloadLink.textContent = '⬇ Download Clip';
+    card.appendChild(downloadLink);
+
+    resultsContainer.appendChild(card);
   });
 }
 
@@ -255,15 +357,7 @@ async function pollStatus(jobId) {
     if (data.status === 'done') {
       clearInterval(pollTimer);
       stageLabel.textContent = 'Done!';
-      document.getElementById('resultVideo').src = data.download_url;
-      document.getElementById('downloadLink').href = data.download_url;
-      document.getElementById('resultMeta').textContent =
-        `Clip taken from ${data.start_time}s–${data.end_time}s of a ${data.source_duration}s source (${data.clip_duration}s clip).`;
-
-      document.getElementById('hookText').textContent = data.hook || '';
-      document.getElementById('hookVibeTag').textContent = data.vibe || '';
-
-      result.style.display = 'block';
+      renderClips(data.clips, data.source_duration);
     } else if (data.status === 'error') {
       clearInterval(pollTimer);
       showError(data.error || 'Something went wrong during processing.');
@@ -279,19 +373,6 @@ function showError(msg) {
   document.getElementById('processBtn').disabled = false;
 }
 
-document.getElementById('copyHookBtn').addEventListener('click', () => {
-  const btn = document.getElementById('copyHookBtn');
-  const text = document.getElementById('hookText').textContent;
-  navigator.clipboard.writeText(text).then(() => {
-    btn.textContent = 'Copied ✓';
-    btn.classList.add('copied');
-    setTimeout(() => {
-      btn.textContent = 'Copy Hook';
-      btn.classList.remove('copied');
-    }, 1500);
-  });
-});
-
 document.getElementById('processBtn').addEventListener('click', async () => {
   const fileInput = document.getElementById('video');
   const btn = document.getElementById('processBtn');
@@ -301,13 +382,17 @@ document.getElementById('processBtn').addEventListener('click', async () => {
     return;
   }
 
+  const nClips = currentMode === 'podcast' ? clipcountInput.value : 1;
+
   const formData = new FormData();
   formData.append('video', fileInput.files[0]);
   formData.append('clip_len', cliplenInput.value);
+  formData.append('n_clips', nClips);
 
   btn.disabled = true;
   errorBox.style.display = 'none';
-  result.style.display = 'none';
+  resultsHeader.style.display = 'none';
+  resultsContainer.innerHTML = '';
   progressCard.style.display = 'block';
   stageLabel.textContent = 'Uploading…';
   progressFill.style.width = '0%';
@@ -323,7 +408,7 @@ document.getElementById('processBtn').addEventListener('click', async () => {
       return;
     }
 
-    pollTimer = setInterval(() => pollStatus(data.job_id), 2000);
+    pollTimer = setInterval(() => pollStatus(data.job_id), 3000);
   } catch (err) {
     showError('Upload failed: ' + err.message);
   } finally {
