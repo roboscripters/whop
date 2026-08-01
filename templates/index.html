@@ -1,1 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Whop Clipper — Auto Hook Finder</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, system-ui, sans-serif;
+    background: #0f0f14;
+    color: #f0f0f5;
+    padding: 20px;
+  }
+  .container { max-width: 480px; margin: 0 auto; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  p.sub { color: #9a9aa5; font-size: 14px; margin-top: 0; margin-bottom: 24px; }
+  .card {
+    background: #1a1a22;
+    border-radius: 16px;
+    padding: 20px;
+    margin-bottom: 16px;
+    border: 1px solid #2a2a35;
+  }
+  label { display: block; font-size: 14px; margin-bottom: 8px; color: #c5c5d0; }
+  input[type="file"] {
+    width: 100%;
+    padding: 12px;
+    background: #24242e;
+    border: 1px dashed #3a3a48;
+    border-radius: 10px;
+    color: #f0f0f5;
+    margin-bottom: 16px;
+  }
+  input[type="range"] { width: 100%; }
+  .range-val { text-align: center; font-size: 18px; font-weight: 600; margin: 8px 0 16px; color: #7c9fff; }
+  button {
+    width: 100%;
+    padding: 14px;
+    background: #5b6cff;
+    border: none;
+    border-radius: 10px;
+    color: white;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { background: #3a3a48; }
 
+  /* Progress card */
+  #progressCard { display: none; }
+  .stage-label {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    text-align: center;
+    color: #f0f0f5;
+  }
+  .progress-track {
+    width: 100%;
+    height: 10px;
+    background: #24242e;
+    border-radius: 6px;
+    overflow: hidden;
+    margin-bottom: 8px;
+  }
+  .progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #5b6cff, #7c9fff);
+    width: 0%;
+    transition: width 0.4s ease;
+  }
+  .progress-pct { text-align: center; font-size: 13px; color: #9a9aa5; }
+  .steps {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 16px;
+    font-size: 11px;
+    color: #5a5a68;
+  }
+  .steps span.active { color: #7c9fff; font-weight: 600; }
+  .steps span.complete { color: #4ade80; }
+
+  #errorBox {
+    display: none;
+    background: #2a1a1a;
+    border: 1px solid #4a2a2a;
+    color: #ff9a9a;
+    padding: 12px;
+    border-radius: 10px;
+    font-size: 13px;
+    margin-top: 16px;
+  }
+
+  #result { display: none; margin-top: 16px; }
+  #result video { width: 100%; border-radius: 12px; }
+  .meta { font-size: 13px; color: #9a9aa5; margin-top: 10px; line-height: 1.6; }
+  a.download-btn {
+    display: block;
+    text-align: center;
+    margin-top: 12px;
+    padding: 12px;
+    background: #24242e;
+    border-radius: 10px;
+    color: #7c9fff;
+    text-decoration: none;
+    font-weight: 600;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🎬 Whop Clipper</h1>
+  <p class="sub">Upload a trailer — get back the best hook, auto-cut.</p>
+
+  <div class="card" id="uploadCard">
+    <label for="video">Video file (trailer, up to ~500MB)</label>
+    <input type="file" id="video" accept="video/*">
+
+    <label for="cliplen">Clip length: <span class="range-val" id="cliplenVal">30s</span></label>
+    <input type="range" id="cliplen" min="15" max="60" value="30" step="5">
+
+    <button id="processBtn">Find Best Clip</button>
+  </div>
+
+  <div class="card" id="progressCard">
+    <div class="stage-label" id="stageLabel">Starting…</div>
+    <div class="progress-track">
+      <div class="progress-fill" id="progressFill"></div>
+    </div>
+    <div class="progress-pct" id="progressPct">0%</div>
+    <div class="steps">
+      <span data-stage="audio">Audio</span>
+      <span data-stage="motion">Motion</span>
+      <span data-stage="scoring">Scoring</span>
+      <span data-stage="cutting">Cutting</span>
+    </div>
+    <div id="errorBox"></div>
+  </div>
+
+  <div id="result" class="card">
+    <video id="resultVideo" controls></video>
+    <div class="meta" id="resultMeta"></div>
+    <a id="downloadLink" class="download-btn" href="#" download>⬇ Download Clip</a>
+  </div>
+</div>
+
+<script>
+const cliplenInput = document.getElementById('cliplen');
+const cliplenVal = document.getElementById('cliplenVal');
+cliplenInput.addEventListener('input', () => {
+  cliplenVal.textContent = cliplenInput.value + 's';
+});
+
+const uploadCard = document.getElementById('uploadCard');
+const progressCard = document.getElementById('progressCard');
+const stageLabel = document.getElementById('stageLabel');
+const progressFill = document.getElementById('progressFill');
+const progressPct = document.getElementById('progressPct');
+const errorBox = document.getElementById('errorBox');
+const result = document.getElementById('result');
+
+// Map backend stage text -> step key, for the little step tracker
+function stageKey(stage) {
+  const s = stage.toLowerCase();
+  if (s.includes('audio')) return 'audio';
+  if (s.includes('motion')) return 'motion';
+  if (s.includes('scoring') || s.includes('segment')) return 'scoring';
+  if (s.includes('cutting')) return 'cutting';
+  return null;
+}
+
+function updateSteps(currentKey) {
+  const order = ['audio', 'motion', 'scoring', 'cutting'];
+  const currentIdx = order.indexOf(currentKey);
+  document.querySelectorAll('.steps span').forEach(el => {
+    const key = el.dataset.stage;
+    const idx = order.indexOf(key);
+    el.classList.remove('active', 'complete');
+    if (currentIdx === -1) return;
+    if (idx < currentIdx) el.classList.add('complete');
+    else if (idx === currentIdx) el.classList.add('active');
+  });
+}
+
+let pollTimer = null;
+
+async function pollStatus(jobId) {
+  try {
+    const res = await fetch('/status/' + jobId);
+    const data = await res.json();
+
+    if (data.error) {
+      showError(data.error);
+      return;
+    }
+
+    const pct = data.progress || 0;
+    progressFill.style.width = pct + '%';
+    progressPct.textContent = pct + '%';
+    stageLabel.textContent = data.stage || 'Processing…';
+    updateSteps(stageKey(data.stage || ''));
+
+    if (data.status === 'done') {
+      clearInterval(pollTimer);
+      stageLabel.textContent = 'Done!';
+      document.getElementById('resultVideo').src = data.download_url;
+      document.getElementById('downloadLink').href = data.download_url;
+      document.getElementById('resultMeta').textContent =
+        `Clip taken from ${data.start_time}s–${data.end_time}s of a ${data.source_duration}s source (${data.clip_duration}s clip).`;
+      result.style.display = 'block';
+    } else if (data.status === 'error') {
+      clearInterval(pollTimer);
+      showError(data.error || 'Something went wrong during processing.');
+    }
+  } catch (err) {
+    // transient network hiccup, keep polling
+  }
+}
+
+function showError(msg) {
+  errorBox.style.display = 'block';
+  errorBox.textContent = '⚠ ' + msg;
+  document.getElementById('processBtn').disabled = false;
+}
+
+document.getElementById('processBtn').addEventListener('click', async () => {
+  const fileInput = document.getElementById('video');
+  const btn = document.getElementById('processBtn');
+
+  if (!fileInput.files.length) {
+    alert('Pick a video first.');
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append('video', fileInput.files[0]);
+  formData.append('clip_len', cliplenInput.value);
+
+  btn.disabled = true;
+  errorBox.style.display = 'none';
+  result.style.display = 'none';
+  progressCard.style.display = 'block';
+  stageLabel.textContent = 'Uploading…';
+  progressFill.style.width = '0%';
+  progressPct.textContent = '0%';
+  updateSteps(null);
+
+  try {
+    const res = await fetch('/process', { method: 'POST', body: formData });
+    const data = await res.json();
+
+    if (data.error) {
+      showError(data.error);
+      return;
+    }
+
+    pollTimer = setInterval(() => pollStatus(data.job_id), 2000);
+  } catch (err) {
+    showError('Upload failed: ' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
