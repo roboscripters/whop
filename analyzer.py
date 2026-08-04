@@ -15,12 +15,113 @@ import cv2
 import os
 import json
 import random
+import re
+from faster_whisper import WhisperModel
 
 WINDOW_SEC = 0.5  # resolution of the excitement timeline
 
 # Videos longer than this get sparser frame sampling for motion analysis,
 # so a 2-hour podcast doesn't take forever to process even on strong hardware.
 LONG_VIDEO_THRESHOLD_SEC = 20 * 60
+
+# Whisper model, loaded once and reused across jobs (loading takes a few
+# seconds, so we don't want to redo it per-clip or per-request).
+# "base" is a good speed/accuracy tradeoff for CPU; "small" is more accurate
+# but slower — bump this if hook quality matters more than processing time.
+_whisper_model = None
+
+
+def _get_whisper_model():
+    global _whisper_model
+    if _whisper_model is None:
+        _whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+    return _whisper_model
+
+
+def transcribe_video(video_path, audio_path):
+    """
+    Run Whisper on the extracted audio track. Returns a list of
+    {start, end, text} segments with timestamps in the source video's
+    timeline (seconds).
+    """
+    model = _get_whisper_model()
+    segments, _info = model.transcribe(audio_path, beam_size=1, vad_filter=True)
+
+    result = []
+    for seg in segments:
+        text = seg.text.strip()
+        if text:
+            result.append({"start": seg.start, "end": seg.end, "text": text})
+    return result
+
+
+def find_best_line(transcript, start_time, end_time):
+    """
+    From the transcript segments overlapping [start_time, end_time], pick
+    the single most 'quotable' line to use as the hook — preferring
+    questions, exclamations, and emphatic short lines over flat narration.
+
+    Returns the line text, or None if no transcript overlaps this range.
+    """
+    overlapping = [
+        seg for seg in transcript
+        if seg["end"] > start_time and seg["start"] < end_time
+    ]
+    if not overlapping:
+        return None
+
+    def quotability(seg):
+        text = seg["text"]
+        score = 0
+        if "?" in text:
+            score += 3
+        if "!" in text:
+            score += 3
+        word_count = len(text.split())
+        # Prefer punchy lines — not too short (fragments), not too long (rambling)
+        if 4 <= word_count <= 14:
+            score += 2
+        elif word_count > 20:
+            score -= 2
+        # Emphatic/superlative language bumps quotability
+        emphasis_words = ["never", "always", "worst", "best", "can't believe",
+                           "insane", "crazy", "no way", "literally", "actually"]
+        lowered = text.lower()
+        score += sum(1 for w in emphasis_words if w in lowered)
+        return score
+
+    best = max(overlapping, key=quotability)
+    return best["text"]
+
+
+def write_srt(transcript, start_time, end_time, srt_path):
+    """
+    Write an SRT subtitle file for the transcript segments overlapping
+    [start_time, end_time], with timestamps re-based to start at 0
+    (since the output clip itself starts at 0, not at start_time).
+    """
+    overlapping = [
+        seg for seg in transcript
+        if seg["end"] > start_time and seg["start"] < end_time
+    ]
+
+    def fmt_ts(t):
+        t = max(0, t)
+        h = int(t // 3600)
+        m = int((t % 3600) // 60)
+        s = int(t % 60)
+        ms = int((t - int(t)) * 1000)
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+    with open(srt_path, "w", encoding="utf-8") as f:
+        for i, seg in enumerate(overlapping, start=1):
+            rel_start = max(0, seg["start"] - start_time)
+            rel_end = max(0, seg["end"] - start_time)
+            if rel_end <= rel_start:
+                continue
+            f.write(f"{i}\n")
+            f.write(f"{fmt_ts(rel_start)} --> {fmt_ts(rel_end)}\n")
+            f.write(f"{seg['text'].strip()}\n\n")
 
 
 def get_video_duration(video_path):
@@ -251,23 +352,34 @@ def find_top_segments(combined_score, window_sec, clip_len_sec, n_clips=1,
 
 
 def cut_clip(video_path, start_time, end_time, output_path, crop_filter=None,
-             target_width=1080, target_height=1920):
+             target_width=1080, target_height=1920, srt_path=None):
     """Cut using ffmpeg with re-encode for frame-accurate trimming.
 
     -movflags +faststart moves the mp4 index (moov atom) to the front of
     the file. Without this, browsers can't stream/seek the video until
     the whole file downloads.
 
-    If crop_filter is provided (a ffmpeg crop=... string), the output is
-    cropped to that region and scaled to target_width x target_height —
-    used for the 9:16 vertical format social platforms expect.
+    If crop_filter is provided, the output is cropped to that region and
+    scaled to target_width x target_height (9:16 vertical format).
+
+    If srt_path is provided, captions are burned into the video using
+    that subtitle file (already time-shifted to start at 0 for this clip).
     """
     duration = end_time - start_time
     cmd = ["ffmpeg", "-y", "-ss", str(start_time), "-i", video_path, "-t", str(duration)]
 
+    vf_parts = []
     if crop_filter:
-        vf = f"{crop_filter},scale={target_width}:{target_height}"
-        cmd += ["-vf", vf]
+        vf_parts.append(crop_filter)
+        vf_parts.append(f"scale={target_width}:{target_height}")
+    if srt_path and os.path.exists(srt_path):
+        # Escape path for ffmpeg filter syntax (colons need escaping on most platforms)
+        escaped_srt = srt_path.replace(":", "\\:")
+        style = "FontSize=16,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=1,Outline=2,Alignment=2,MarginV=60"
+        vf_parts.append(f"subtitles={escaped_srt}:force_style='{style}'")
+
+    if vf_parts:
+        cmd += ["-vf", ",".join(vf_parts)]
 
     cmd += ["-c:v", "libx264", "-c:a", "aac", "-preset", "fast",
             "-movflags", "+faststart", output_path]
@@ -337,24 +449,38 @@ def classify_vibe(audio_seg, motion_seg):
     return "relatable"
 
 
-def generate_hook(audio_scores, motion_scores, start_time, end_time, window_sec=WINDOW_SEC):
+def generate_hook(audio_scores, motion_scores, start_time, end_time,
+                   window_sec=WINDOW_SEC, transcript=None):
     """
-    Pick a fully-written hook line whose vibe matches the selected clip segment.
-    Returns (hook_text, vibe_label).
+    Pick a hook line for the clip. If a transcript is available and has a
+    quotable line within this segment, use that real spoken line (quoted).
+    Otherwise fall back to a vibe-matched generic hook.
+
+    Returns (hook_text, vibe_label, is_real_quote).
     """
     start_idx = int(start_time / window_sec)
     end_idx = int(end_time / window_sec)
     audio_seg = audio_scores[start_idx:end_idx]
     motion_seg = motion_scores[start_idx:end_idx]
-
     vibe = classify_vibe(audio_seg, motion_seg)
+
+    if transcript:
+        line = find_best_line(transcript, start_time, end_time)
+        if line:
+            # Keep it punchy — truncate very long lines rather than showing a paragraph
+            words = line.split()
+            if len(words) > 16:
+                line = " ".join(words[:16]) + "..."
+            return f'"{line}"', vibe, True
+
     hook = random.choice(HOOK_POOLS[vibe])
-    return hook, vibe
+    return hook, vibe, False
 
 
 def analyze_and_clip(video_path, output_dir, job_id, clip_len_sec=30,
                       audio_weight=0.5, motion_weight=0.5, n_clips=1,
-                      vertical_crop=False, progress_callback=None):
+                      vertical_crop=False, burn_captions=False,
+                      progress_callback=None):
     """
     Main entry point. Returns a dict with a 'clips' list (each with its own
     timing, hook, vibe, output path) plus overall video_duration.
@@ -364,6 +490,10 @@ def analyze_and_clip(video_path, output_dir, job_id, clip_len_sec=30,
 
     vertical_crop: if True, output clips are cropped to 9:16 (centered on
     detected faces where possible) instead of keeping the source aspect ratio.
+
+    burn_captions: if True, runs Whisper transcription on the source audio
+    and (a) uses real spoken lines as hooks where possible, and (b) burns
+    matching captions into each output clip.
 
     progress_callback(stage: str, pct: int) is called at each step, if
     provided, so a caller (e.g. a Flask job-status endpoint) can report
@@ -378,18 +508,23 @@ def analyze_and_clip(video_path, output_dir, job_id, clip_len_sec=30,
     clip_len_sec = min(clip_len_sec, duration)
     video_width, video_height = get_video_dimensions(video_path)
 
-    report("Extracting audio", 15)
+    report("Extracting audio", 12)
     audio_path = video_path + ".wav"
     extract_audio(video_path, audio_path)
 
-    report("Analyzing audio energy", 35)
+    transcript = None
+    if burn_captions:
+        report("Transcribing speech", 25)
+        transcript = transcribe_video(video_path, audio_path)
+
+    report("Analyzing audio energy", 45)
     audio_scores = audio_energy_timeline(audio_path, duration)
     os.remove(audio_path)
 
     report("Analyzing motion energy", 65)
     motion_scores = motion_energy_timeline(video_path, duration)
 
-    report("Scoring best segments", 80)
+    report("Scoring best segments", 78)
     n = min(len(audio_scores), len(motion_scores))
     audio_scores, motion_scores = audio_scores[:n], motion_scores[:n]
 
@@ -399,7 +534,7 @@ def analyze_and_clip(video_path, output_dir, job_id, clip_len_sec=30,
     clips = []
     total_segments = len(segments)
     for i, (start_time, end_time) in enumerate(segments):
-        pct = 85 + int(10 * (i + 1) / max(1, total_segments))
+        pct = 80 + int(15 * (i + 1) / max(1, total_segments))
 
         crop_filter = None
         if vertical_crop:
@@ -407,11 +542,24 @@ def analyze_and_clip(video_path, output_dir, job_id, clip_len_sec=30,
             center_x = find_crop_center_x(video_path, start_time, end_time, video_width)
             crop_filter = build_crop_filter(video_width, video_height, center_x)
 
+        srt_path = None
+        if burn_captions and transcript:
+            srt_path = os.path.join(output_dir, f"{job_id}_clip{i + 1}.srt")
+            write_srt(transcript, start_time, end_time, srt_path)
+
         report(f"Cutting clip {i + 1}/{total_segments}", pct)
         output_path = os.path.join(output_dir, f"{job_id}_clip{i + 1}.mp4")
-        cut_clip(video_path, start_time, end_time, output_path, crop_filter=crop_filter)
+        cut_clip(video_path, start_time, end_time, output_path,
+                 crop_filter=crop_filter, srt_path=srt_path)
 
-        hook_text, vibe = generate_hook(audio_scores, motion_scores, start_time, end_time)
+        # Clean up the temp SRT file now that it's burned in — don't need
+        # to serve it separately.
+        if srt_path and os.path.exists(srt_path):
+            os.remove(srt_path)
+
+        hook_text, vibe, is_real_quote = generate_hook(
+            audio_scores, motion_scores, start_time, end_time, transcript=transcript
+        )
 
         clips.append({
             "start_time": round(start_time, 2),
@@ -421,6 +569,7 @@ def analyze_and_clip(video_path, output_dir, job_id, clip_len_sec=30,
             "filename": os.path.basename(output_path),
             "hook": hook_text,
             "vibe": vibe,
+            "hook_is_quote": is_real_quote,
         })
 
     report("Done", 100)
