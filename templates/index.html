@@ -57,6 +57,27 @@
   }
   .mode-toggle button.active { background: #5b6cff; color: white; }
 
+  .crop-toggle-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #24242e;
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+  }
+  .crop-toggle-row label {
+    font-size: 13px;
+    color: #c5c5d0;
+    flex: 1;
+    margin-right: 10px;
+  }
+  .crop-toggle-row input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
+    accent-color: #5b6cff;
+  }
+
   #progressCard { display: none; }
   .stage-label {
     font-size: 15px;
@@ -191,6 +212,11 @@
     <div id="clipCountRow" style="display:none;">
       <label for="clipcount">Number of clips: <span class="range-val" id="clipcountVal">3</span></label>
       <input type="range" id="clipcount" min="3" max="5" value="3" step="1">
+    </div>
+
+    <div class="crop-toggle-row">
+      <label for="verticalCrop" style="margin-bottom:0;">Vertical crop (9:16 for Reels/Shorts)</label>
+      <input type="checkbox" id="verticalCrop" checked>
     </div>
 
     <button id="processBtn">Find Best Clip(s)</button>
@@ -383,11 +409,13 @@ document.getElementById('processBtn').addEventListener('click', async () => {
   }
 
   const nClips = currentMode === 'podcast' ? clipcountInput.value : 1;
+  const verticalCrop = document.getElementById('verticalCrop').checked;
 
   const formData = new FormData();
   formData.append('video', fileInput.files[0]);
   formData.append('clip_len', cliplenInput.value);
   formData.append('n_clips', nClips);
+  formData.append('vertical_crop', verticalCrop);
 
   btn.disabled = true;
   errorBox.style.display = 'none';
