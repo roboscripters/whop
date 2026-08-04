@@ -219,6 +219,11 @@
       <input type="checkbox" id="verticalCrop" checked>
     </div>
 
+    <div class="crop-toggle-row">
+      <label for="burnCaptions" style="margin-bottom:0;">Burn in captions + smarter hooks (uses transcription, slower)</label>
+      <input type="checkbox" id="burnCaptions">
+    </div>
+
     <button id="processBtn">Find Best Clip(s)</button>
   </div>
 
@@ -229,6 +234,7 @@
     </div>
     <div class="progress-pct" id="progressPct">0%</div>
     <div class="steps">
+      <span data-stage="transcribe">Transcribe</span>
       <span data-stage="audio">Audio</span>
       <span data-stage="motion">Motion</span>
       <span data-stage="scoring">Scoring</span>
@@ -283,15 +289,16 @@ const resultsContainer = document.getElementById('resultsContainer');
 
 function stageKey(stage) {
   const s = stage.toLowerCase();
+  if (s.includes('transcrib')) return 'transcribe';
   if (s.includes('audio')) return 'audio';
   if (s.includes('motion')) return 'motion';
-  if (s.includes('scoring') || s.includes('segment')) return 'scoring';
+  if (s.includes('scoring') || s.includes('segment') || s.includes('subject')) return 'scoring';
   if (s.includes('cutting')) return 'cutting';
   return null;
 }
 
 function updateSteps(currentKey) {
-  const order = ['audio', 'motion', 'scoring', 'cutting'];
+  const order = ['transcribe', 'audio', 'motion', 'scoring', 'cutting'];
   const currentIdx = order.indexOf(currentKey);
   document.querySelectorAll('.steps span').forEach(el => {
     const key = el.dataset.stage;
@@ -330,10 +337,13 @@ function renderClips(clips, sourceDuration) {
 
     const hookBox = document.createElement('div');
     hookBox.className = 'hook-box';
+    const quoteBadge = clip.hook_is_quote
+      ? '<span class="hook-vibe-tag" style="background:#2d5a3d;color:#4ade80;margin-right:6px;">real quote</span>'
+      : '';
     hookBox.innerHTML = `
       <div class="hook-label">
         <span>Suggested Hook</span>
-        <span class="hook-vibe-tag">${clip.vibe}</span>
+        <span>${quoteBadge}<span class="hook-vibe-tag">${clip.vibe}</span></span>
       </div>
       <div class="hook-text">${clip.hook}</div>
       <button class="copy-hook-btn">Copy Hook</button>
@@ -410,12 +420,14 @@ document.getElementById('processBtn').addEventListener('click', async () => {
 
   const nClips = currentMode === 'podcast' ? clipcountInput.value : 1;
   const verticalCrop = document.getElementById('verticalCrop').checked;
+  const burnCaptions = document.getElementById('burnCaptions').checked;
 
   const formData = new FormData();
   formData.append('video', fileInput.files[0]);
   formData.append('clip_len', cliplenInput.value);
   formData.append('n_clips', nClips);
   formData.append('vertical_crop', verticalCrop);
+  formData.append('burn_captions', burnCaptions);
 
   btn.disabled = true;
   errorBox.style.display = 'none';
