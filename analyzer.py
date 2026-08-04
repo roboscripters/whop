@@ -33,6 +33,86 @@ def get_video_duration(video_path):
     return float(info["format"]["duration"])
 
 
+def get_video_dimensions(video_path):
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "json", video_path],
+        capture_output=True, text=True
+    )
+    info = json.loads(result.stdout)
+    stream = info["streams"][0]
+    return int(stream["width"]), int(stream["height"])
+
+
+_face_cascade = None
+
+
+def _get_face_cascade():
+    global _face_cascade
+    if _face_cascade is None:
+        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        _face_cascade = cv2.CascadeClassifier(cascade_path)
+    return _face_cascade
+
+
+def find_crop_center_x(video_path, start_time, end_time, video_width, sample_count=6):
+    """
+    Sample a handful of frames within the clip's time range and look for
+    faces, to find a good horizontal center point for a 9:16 crop.
+
+    Returns the x-coordinate (in source pixels) to center the crop on.
+    Falls back to the frame's horizontal center if no faces are found
+    anywhere in the sample (e.g. scenery/action shots).
+    """
+    cascade = _get_face_cascade()
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+
+    duration = end_time - start_time
+    sample_times = [
+        start_time + duration * (i + 1) / (sample_count + 1)
+        for i in range(sample_count)
+    ]
+
+    face_centers = []
+    for t in sample_times:
+        frame_num = int(t * fps)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
+        if len(faces) > 0:
+            # Use the largest face found (most likely the main subject)
+            largest = max(faces, key=lambda f: f[2] * f[3])
+            face_center_x = largest[0] + largest[2] / 2
+            face_centers.append(face_center_x)
+
+    cap.release()
+
+    if face_centers:
+        return float(np.median(face_centers))
+    return video_width / 2.0
+
+
+def build_crop_filter(video_width, video_height, center_x, target_ratio=9 / 16):
+    """
+    Build an ffmpeg crop filter string for a 9:16 vertical crop, centered
+    on center_x but clamped so the crop window stays within frame bounds.
+    """
+    crop_width = int(video_height * target_ratio)
+    if crop_width > video_width:
+        # Source is already narrower than a 9:16 crop would need —
+        # just use the full width instead (can't crop wider than source).
+        crop_width = video_width
+
+    crop_x = int(center_x - crop_width / 2)
+    crop_x = max(0, min(crop_x, video_width - crop_width))
+
+    return f"crop={crop_width}:{video_height}:{crop_x}:0"
+
+
 def extract_audio(video_path, audio_path):
     """Pull audio out as mono wav for librosa analysis."""
     subprocess.run(
@@ -170,21 +250,29 @@ def find_top_segments(combined_score, window_sec, clip_len_sec, n_clips=1,
     return segments
 
 
-def cut_clip(video_path, start_time, end_time, output_path):
+def cut_clip(video_path, start_time, end_time, output_path, crop_filter=None,
+             target_width=1080, target_height=1920):
     """Cut using ffmpeg with re-encode for frame-accurate trimming.
 
     -movflags +faststart moves the mp4 index (moov atom) to the front of
     the file. Without this, browsers can't stream/seek the video until
-    the whole file downloads — causing a "only plays a few seconds,
-    then dumps the whole download at once" symptom.
+    the whole file downloads.
+
+    If crop_filter is provided (a ffmpeg crop=... string), the output is
+    cropped to that region and scaled to target_width x target_height —
+    used for the 9:16 vertical format social platforms expect.
     """
     duration = end_time - start_time
-    subprocess.run(
-        ["ffmpeg", "-y", "-ss", str(start_time), "-i", video_path,
-         "-t", str(duration), "-c:v", "libx264", "-c:a", "aac",
-         "-preset", "fast", "-movflags", "+faststart", output_path],
-        check=True, capture_output=True
-    )
+    cmd = ["ffmpeg", "-y", "-ss", str(start_time), "-i", video_path, "-t", str(duration)]
+
+    if crop_filter:
+        vf = f"{crop_filter},scale={target_width}:{target_height}"
+        cmd += ["-vf", vf]
+
+    cmd += ["-c:v", "libx264", "-c:a", "aac", "-preset", "fast",
+            "-movflags", "+faststart", output_path]
+
+    subprocess.run(cmd, check=True, capture_output=True)
 
 
 HOOK_POOLS = {
@@ -266,13 +354,16 @@ def generate_hook(audio_scores, motion_scores, start_time, end_time, window_sec=
 
 def analyze_and_clip(video_path, output_dir, job_id, clip_len_sec=30,
                       audio_weight=0.5, motion_weight=0.5, n_clips=1,
-                      progress_callback=None):
+                      vertical_crop=False, progress_callback=None):
     """
     Main entry point. Returns a dict with a 'clips' list (each with its own
     timing, hook, vibe, output path) plus overall video_duration.
 
     n_clips: how many top non-overlapping clips to extract. Use 1 for
     short trailers, 3-5+ for long podcasts/streams.
+
+    vertical_crop: if True, output clips are cropped to 9:16 (centered on
+    detected faces where possible) instead of keeping the source aspect ratio.
 
     progress_callback(stage: str, pct: int) is called at each step, if
     provided, so a caller (e.g. a Flask job-status endpoint) can report
@@ -285,6 +376,7 @@ def analyze_and_clip(video_path, output_dir, job_id, clip_len_sec=30,
     report("Reading video info", 5)
     duration = get_video_duration(video_path)
     clip_len_sec = min(clip_len_sec, duration)
+    video_width, video_height = get_video_dimensions(video_path)
 
     report("Extracting audio", 15)
     audio_path = video_path + ".wav"
@@ -308,10 +400,16 @@ def analyze_and_clip(video_path, output_dir, job_id, clip_len_sec=30,
     total_segments = len(segments)
     for i, (start_time, end_time) in enumerate(segments):
         pct = 85 + int(10 * (i + 1) / max(1, total_segments))
-        report(f"Cutting clip {i + 1}/{total_segments}", pct)
 
+        crop_filter = None
+        if vertical_crop:
+            report(f"Finding subject for clip {i + 1}/{total_segments}", pct)
+            center_x = find_crop_center_x(video_path, start_time, end_time, video_width)
+            crop_filter = build_crop_filter(video_width, video_height, center_x)
+
+        report(f"Cutting clip {i + 1}/{total_segments}", pct)
         output_path = os.path.join(output_dir, f"{job_id}_clip{i + 1}.mp4")
-        cut_clip(video_path, start_time, end_time, output_path)
+        cut_clip(video_path, start_time, end_time, output_path, crop_filter=crop_filter)
 
         hook_text, vibe = generate_hook(audio_scores, motion_scores, start_time, end_time)
 
