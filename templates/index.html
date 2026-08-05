@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Whop Clipper — Auto Hook Finder</title>
+<title>Whop Clipper — AI Viral Moment Finder</title>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -71,11 +71,23 @@
     color: #c5c5d0;
     flex: 1;
     margin-right: 10px;
+    margin-bottom: 0;
   }
   .crop-toggle-row input[type="checkbox"] {
     width: 20px;
     height: 20px;
     accent-color: #5b6cff;
+  }
+
+  .info-note {
+    font-size: 12px;
+    color: #6a6a78;
+    background: #1e2440;
+    border: 1px solid #2a3a6a;
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 16px;
+    line-height: 1.5;
   }
 
   #progressCard { display: none; }
@@ -105,7 +117,7 @@
     display: flex;
     justify-content: space-between;
     margin-top: 16px;
-    font-size: 11px;
+    font-size: 10px;
     color: #5a5a68;
   }
   .steps span.active { color: #7c9fff; font-weight: 600; }
@@ -166,14 +178,15 @@
     justify-content: space-between;
     align-items: center;
   }
-  .hook-vibe-tag {
-    background: #2a2a45;
-    color: #9db3ff;
+  .hook-source-tag {
     padding: 2px 8px;
     border-radius: 6px;
     font-size: 10px;
     text-transform: capitalize;
   }
+  .hook-source-tag.ai_video { background: #2d5a3d; color: #4ade80; }
+  .hook-source-tag.ai_text { background: #2d4a5a; color: #7ec8e3; }
+  .hook-source-tag.fallback { background: #2a2a45; color: #9db3ff; }
   .hook-text {
     font-size: 17px;
     font-weight: 700;
@@ -195,36 +208,32 @@
 <body>
 <div class="container">
   <h1>🎬 Whop Clipper</h1>
-  <p class="sub">Upload a trailer or podcast — get back the best clip(s), auto-cut, with matching hooks.</p>
+  <p class="sub">Upload a film, pilot, or podcast — AI finds the most viral-worthy moment(s) and writes the hook.</p>
 
   <div class="card" id="uploadCard">
     <div class="mode-toggle">
-      <button id="modeTrailerBtn" class="active">Trailer (1 clip)</button>
-      <button id="modePodcastBtn">Podcast (multi-clip)</button>
+      <button id="modeSingleBtn" class="active">Single best moment</button>
+      <button id="modeMultiBtn">Multiple moments</button>
     </div>
 
     <label for="video">Video file (up to ~2GB)</label>
     <input type="file" id="video" accept="video/*">
 
-    <label for="cliplen">Clip length: <span class="range-val" id="cliplenVal">30s</span></label>
-    <input type="range" id="cliplen" min="15" max="60" value="30" step="5">
-
     <div id="clipCountRow" style="display:none;">
-      <label for="clipcount">Number of clips: <span class="range-val" id="clipcountVal">3</span></label>
-      <input type="range" id="clipcount" min="3" max="5" value="3" step="1">
+      <label for="clipcount">Number of moments: <span class="range-val" id="clipcountVal">3</span></label>
+      <input type="range" id="clipcount" min="2" max="8" value="3" step="1">
     </div>
 
     <div class="crop-toggle-row">
-      <label for="verticalCrop" style="margin-bottom:0;">Vertical crop (9:16 for Reels/Shorts)</label>
+      <label for="verticalCrop">Vertical crop (9:16 for Reels/Shorts)</label>
       <input type="checkbox" id="verticalCrop" checked>
     </div>
 
-    <div class="crop-toggle-row">
-      <label for="burnCaptions" style="margin-bottom:0;">Burn in captions + smarter hooks (uses transcription, slower)</label>
-      <input type="checkbox" id="burnCaptions">
+    <div class="info-note">
+      Clip length isn't fixed — AI picks whatever length (up to 60s) best captures each moment.
     </div>
 
-    <button id="processBtn">Find Best Clip(s)</button>
+    <button id="processBtn">Find Viral Moment(s)</button>
   </div>
 
   <div class="card" id="progressCard">
@@ -235,9 +244,8 @@
     <div class="progress-pct" id="progressPct">0%</div>
     <div class="steps">
       <span data-stage="transcribe">Transcribe</span>
-      <span data-stage="audio">Audio</span>
-      <span data-stage="motion">Motion</span>
-      <span data-stage="scoring">Scoring</span>
+      <span data-stage="ai">AI Analysis</span>
+      <span data-stage="crop">Framing</span>
       <span data-stage="cutting">Cutting</span>
     </div>
     <div id="errorBox"></div>
@@ -248,34 +256,27 @@
 </div>
 
 <script>
-const cliplenInput = document.getElementById('cliplen');
-const cliplenVal = document.getElementById('cliplenVal');
-cliplenInput.addEventListener('input', () => {
-  cliplenVal.textContent = cliplenInput.value + 's';
-});
-
 const clipcountInput = document.getElementById('clipcount');
 const clipcountVal = document.getElementById('clipcountVal');
 clipcountInput.addEventListener('input', () => {
   clipcountVal.textContent = clipcountInput.value;
 });
 
-// ---- Mode toggle (trailer = 1 clip, podcast = multi-clip) ----
-const modeTrailerBtn = document.getElementById('modeTrailerBtn');
-const modePodcastBtn = document.getElementById('modePodcastBtn');
+const modeSingleBtn = document.getElementById('modeSingleBtn');
+const modeMultiBtn = document.getElementById('modeMultiBtn');
 const clipCountRow = document.getElementById('clipCountRow');
-let currentMode = 'trailer';
+let currentMode = 'single';
 
-modeTrailerBtn.addEventListener('click', () => {
-  currentMode = 'trailer';
-  modeTrailerBtn.classList.add('active');
-  modePodcastBtn.classList.remove('active');
+modeSingleBtn.addEventListener('click', () => {
+  currentMode = 'single';
+  modeSingleBtn.classList.add('active');
+  modeMultiBtn.classList.remove('active');
   clipCountRow.style.display = 'none';
 });
-modePodcastBtn.addEventListener('click', () => {
-  currentMode = 'podcast';
-  modePodcastBtn.classList.add('active');
-  modeTrailerBtn.classList.remove('active');
+modeMultiBtn.addEventListener('click', () => {
+  currentMode = 'multi';
+  modeMultiBtn.classList.add('active');
+  modeSingleBtn.classList.remove('active');
   clipCountRow.style.display = 'block';
 });
 
@@ -290,15 +291,14 @@ const resultsContainer = document.getElementById('resultsContainer');
 function stageKey(stage) {
   const s = stage.toLowerCase();
   if (s.includes('transcrib')) return 'transcribe';
-  if (s.includes('audio')) return 'audio';
-  if (s.includes('motion')) return 'motion';
-  if (s.includes('scoring') || s.includes('segment') || s.includes('subject')) return 'scoring';
+  if (s.includes('viral') || s.includes('ai') || s.includes('fallback') || s.includes('energy')) return 'ai';
+  if (s.includes('subject') || s.includes('framing')) return 'crop';
   if (s.includes('cutting')) return 'cutting';
   return null;
 }
 
 function updateSteps(currentKey) {
-  const order = ['transcribe', 'audio', 'motion', 'scoring', 'cutting'];
+  const order = ['transcribe', 'ai', 'crop', 'cutting'];
   const currentIdx = order.indexOf(currentKey);
   document.querySelectorAll('.steps span').forEach(el => {
     const key = el.dataset.stage;
@@ -313,7 +313,7 @@ function updateSteps(currentKey) {
 function renderClips(clips, sourceDuration) {
   resultsContainer.innerHTML = '';
   resultsHeader.style.display = 'block';
-  resultsHeader.textContent = `${clips.length} clip${clips.length > 1 ? 's' : ''} found from a ${sourceDuration}s source`;
+  resultsHeader.textContent = `${clips.length} moment${clips.length > 1 ? 's' : ''} found from a ${sourceDuration}s source`;
 
   clips.forEach((clip, idx) => {
     const card = document.createElement('div');
@@ -337,13 +337,12 @@ function renderClips(clips, sourceDuration) {
 
     const hookBox = document.createElement('div');
     hookBox.className = 'hook-box';
-    const quoteBadge = clip.hook_is_quote
-      ? '<span class="hook-vibe-tag" style="background:#2d5a3d;color:#4ade80;margin-right:6px;">real quote</span>'
-      : '';
+    const sourceLabels = { ai_video: 'AI watched it', ai_text: 'AI (transcript)', fallback: 'fallback' };
+    const sourceLabel = sourceLabels[clip.hook_source] || clip.hook_source;
     hookBox.innerHTML = `
       <div class="hook-label">
         <span>Suggested Hook</span>
-        <span>${quoteBadge}<span class="hook-vibe-tag">${clip.vibe}</span></span>
+        <span class="hook-source-tag ${clip.hook_source}">${sourceLabel}</span>
       </div>
       <div class="hook-text">${clip.hook}</div>
       <button class="copy-hook-btn">Copy Hook</button>
@@ -418,16 +417,13 @@ document.getElementById('processBtn').addEventListener('click', async () => {
     return;
   }
 
-  const nClips = currentMode === 'podcast' ? clipcountInput.value : 1;
+  const nClips = currentMode === 'multi' ? clipcountInput.value : 1;
   const verticalCrop = document.getElementById('verticalCrop').checked;
-  const burnCaptions = document.getElementById('burnCaptions').checked;
 
   const formData = new FormData();
   formData.append('video', fileInput.files[0]);
-  formData.append('clip_len', cliplenInput.value);
   formData.append('n_clips', nClips);
   formData.append('vertical_crop', verticalCrop);
-  formData.append('burn_captions', burnCaptions);
 
   btn.disabled = true;
   errorBox.style.display = 'none';
