@@ -4,3 +4,5 @@ numpy==1.26.4
 opencv-python-headless==4.10.0.84
 gunicorn==22.0.0
 faster-whisper==1.0.3
+anthropic==0.39.0
+google-genai==1.0.0
