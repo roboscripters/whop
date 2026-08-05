@@ -15,7 +15,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2GB upload cap (podcasts are big)
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2GB upload cap (podcasts/pilots are big)
 
 db_lock = threading.Lock()
 
@@ -81,16 +81,15 @@ def get_job(job_id):
     return json.loads(row["data"])
 
 
-def run_job(job_id, input_path, clip_len, n_clips, vertical_crop, burn_captions):
+def run_job(job_id, input_path, n_clips, vertical_crop):
     def progress_callback(stage, pct):
         set_job(job_id, stage=stage, progress=pct)
 
     try:
         set_job(job_id, status="processing", stage="Starting", progress=0)
         result = analyze_and_clip(
-            input_path, OUTPUT_DIR, job_id, clip_len_sec=clip_len, n_clips=n_clips,
-            vertical_crop=vertical_crop, burn_captions=burn_captions,
-            progress_callback=progress_callback
+            input_path, OUTPUT_DIR, job_id, n_clips=n_clips,
+            vertical_crop=vertical_crop, progress_callback=progress_callback
         )
 
         clips_out = [
@@ -100,8 +99,7 @@ def run_job(job_id, input_path, clip_len, n_clips, vertical_crop, burn_captions)
                 "end_time": c["end_time"],
                 "duration": c["duration"],
                 "hook": c["hook"],
-                "vibe": c["vibe"],
-                "hook_is_quote": c["hook_is_quote"],
+                "hook_source": c["hook_source"],
             }
             for c in result["clips"]
         ]
@@ -133,14 +131,11 @@ def process():
         return jsonify({"error": "No video uploaded"}), 400
 
     file = request.files["video"]
-    clip_len = int(request.form.get("clip_len", 30))
-    clip_len = max(15, min(60, clip_len))
 
     n_clips = int(request.form.get("n_clips", 1))
     n_clips = max(1, min(10, n_clips))
 
     vertical_crop = request.form.get("vertical_crop", "false").lower() == "true"
-    burn_captions = request.form.get("burn_captions", "false").lower() == "true"
 
     job_id = str(uuid.uuid4())[:8]
     input_ext = os.path.splitext(file.filename)[1] or ".mp4"
@@ -151,9 +146,7 @@ def process():
     set_job(job_id, status="queued", stage="Queued", progress=0)
 
     thread = threading.Thread(
-        target=run_job,
-        args=(job_id, input_path, clip_len, n_clips, vertical_crop, burn_captions),
-        daemon=True
+        target=run_job, args=(job_id, input_path, n_clips, vertical_crop), daemon=True
     )
     thread.start()
 
